@@ -831,8 +831,11 @@ private[spark] class Client(
         env("SPARK_JAVA_OPTS") = value
       }
       // propagate PYSPARK_DRIVER_PYTHON and PYSPARK_PYTHON to driver in cluster mode
-      sys.env.get("PYSPARK_DRIVER_PYTHON").foreach(env("PYSPARK_DRIVER_PYTHON") = _)
-      sys.env.get("PYSPARK_PYTHON").foreach(env("PYSPARK_PYTHON") = _)
+      Seq("PYSPARK_DRIVER_PYTHON", "PYSPARK_PYTHON").foreach { envname =>
+        if (!env.contains(envname)) {
+          sys.env.get(envname).foreach(env(envname) = _)
+        }
+      }
     }
 
     sys.env.get(ENV_DIST_CLASSPATH).foreach { dcp =>
@@ -1080,7 +1083,14 @@ private[spark] class Client(
           case YarnApplicationState.RUNNING =>
             reportLauncherState(SparkAppHandle.State.RUNNING)
           case YarnApplicationState.FINISHED =>
-            reportLauncherState(SparkAppHandle.State.FINISHED)
+            report.getFinalApplicationStatus match {
+              case FinalApplicationStatus.FAILED =>
+                reportLauncherState(SparkAppHandle.State.FAILED)
+              case FinalApplicationStatus.KILLED =>
+                reportLauncherState(SparkAppHandle.State.KILLED)
+              case _ =>
+                reportLauncherState(SparkAppHandle.State.FINISHED)
+            }
           case YarnApplicationState.FAILED =>
             reportLauncherState(SparkAppHandle.State.FAILED)
           case YarnApplicationState.KILLED =>

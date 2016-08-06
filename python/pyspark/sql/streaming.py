@@ -269,7 +269,7 @@ class DataStreamReader(OptionUtils):
 
         .. note:: Experimental.
 
-        :param schema: a StructType object
+        :param schema: a :class:`pyspark.sql.types.StructType` object
 
         >>> s = spark.readStream.schema(sdf_schema)
         """
@@ -310,12 +310,12 @@ class DataStreamReader(OptionUtils):
 
         :param path: optional string for file-system backed data sources.
         :param format: optional string for format of the data source. Default to 'parquet'.
-        :param schema: optional :class:`StructType` for the input schema.
+        :param schema: optional :class:`pyspark.sql.types.StructType` for the input schema.
         :param options: all other string options
 
         >>> json_sdf = spark.readStream.format("json")\
                                        .schema(sdf_schema)\
-                                       .load(os.path.join(tempfile.mkdtemp(),'data'))
+                                       .load(tempfile.mkdtemp())
         >>> json_sdf.isStreaming
         True
         >>> json_sdf.schema == sdf_schema
@@ -349,7 +349,7 @@ class DataStreamReader(OptionUtils):
 
         :param path: string represents path to the JSON dataset,
                      or RDD of Strings storing JSON objects.
-        :param schema: an optional :class:`StructType` for the input schema.
+        :param schema: an optional :class:`pyspark.sql.types.StructType` for the input schema.
         :param primitivesAsString: infers all primitive values as a string type. If None is set,
                                    it uses the default value, ``false``.
         :param prefersDecimal: infers all floating-point values as a decimal type. If the values
@@ -382,8 +382,7 @@ class DataStreamReader(OptionUtils):
                                           it uses the value specified in
                                           ``spark.sql.columnNameOfCorruptRecord``.
 
-        >>> json_sdf = spark.readStream.json(os.path.join(tempfile.mkdtemp(), 'data'), \
-                schema = sdf_schema)
+        >>> json_sdf = spark.readStream.json(tempfile.mkdtemp(), schema = sdf_schema)
         >>> json_sdf.isStreaming
         True
         >>> json_sdf.schema == sdf_schema
@@ -411,8 +410,7 @@ class DataStreamReader(OptionUtils):
 
         .. note:: Experimental.
 
-        >>> parquet_sdf = spark.readStream.schema(sdf_schema)\
-                .parquet(os.path.join(tempfile.mkdtemp()))
+        >>> parquet_sdf = spark.readStream.schema(sdf_schema).parquet(tempfile.mkdtemp())
         >>> parquet_sdf.isStreaming
         True
         >>> parquet_sdf.schema == sdf_schema
@@ -437,7 +435,7 @@ class DataStreamReader(OptionUtils):
 
         :param paths: string, or list of strings, for input path(s).
 
-        >>> text_sdf = spark.readStream.text(os.path.join(tempfile.mkdtemp(), 'data'))
+        >>> text_sdf = spark.readStream.text(tempfile.mkdtemp())
         >>> text_sdf.isStreaming
         True
         >>> "value" in str(text_sdf.schema)
@@ -463,7 +461,7 @@ class DataStreamReader(OptionUtils):
         .. note:: Experimental.
 
         :param path: string, or list of strings, for input path(s).
-        :param schema: an optional :class:`StructType` for the input schema.
+        :param schema: an optional :class:`pyspark.sql.types.StructType` for the input schema.
         :param sep: sets the single character as a separator for each field and value.
                     If None is set, it uses the default value, ``,``.
         :param encoding: decodes the CSV files by the given encoding type. If None is set,
@@ -512,8 +510,7 @@ class DataStreamReader(OptionUtils):
                 * ``DROPMALFORMED`` : ignores the whole corrupted records.
                 * ``FAILFAST`` : throws an exception when it meets corrupted records.
 
-        >>> csv_sdf = spark.readStream.csv(os.path.join(tempfile.mkdtemp(), 'data'), \
-                schema = sdf_schema)
+        >>> csv_sdf = spark.readStream.csv(tempfile.mkdtemp(), schema = sdf_schema)
         >>> csv_sdf.isStreaming
         True
         >>> csv_sdf.schema == sdf_schema
