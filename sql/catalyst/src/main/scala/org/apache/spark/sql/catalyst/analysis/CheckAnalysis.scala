@@ -141,8 +141,8 @@ trait CheckAnalysis extends PredicateHelper {
 
             // Skip projects and subquery aliases added by the Analyzer and the SQLBuilder.
             def cleanQuery(p: LogicalPlan): LogicalPlan = p match {
-              case SubqueryAlias(_, child) => cleanQuery(child)
-              case Project(_, child) => cleanQuery(child)
+              case s: SubqueryAlias => cleanQuery(s.child)
+              case p: Project => cleanQuery(p.child)
               case child => child
             }
 
@@ -287,7 +287,8 @@ trait CheckAnalysis extends PredicateHelper {
               }
               // Check if the data types match.
               dataTypes(child).zip(ref).zipWithIndex.foreach { case ((dt1, dt2), ci) =>
-                if (dt1 != dt2) {
+                // SPARK-18058: we shall not care about the nullability of columns
+                if (dt1.asNullable != dt2.asNullable) {
                   failAnalysis(
                     s"""
                       |${operator.nodeName} can only be performed on tables with the compatible
@@ -360,6 +361,7 @@ trait CheckAnalysis extends PredicateHelper {
 
           case InsertIntoTable(t, _, _, _, _)
             if !t.isInstanceOf[LeafNode] ||
+              t.isInstanceOf[Range] ||
               t == OneRowRelation ||
               t.isInstanceOf[LocalRelation] =>
             failAnalysis(s"Inserting into an RDD-based table is not allowed.")

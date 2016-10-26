@@ -37,6 +37,7 @@ import org.apache.hadoop.security.UserGroupInformation
 
 import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.internal.Logging
+import org.apache.spark.metrics.source.HiveCatalogMetrics
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.{NoSuchDatabaseException, NoSuchPartitionException}
@@ -45,7 +46,6 @@ import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.parser.{CatalystSqlParser, ParseException}
 import org.apache.spark.sql.execution.QueryExecutionException
-import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.util.{CircularBuffer, Utils}
 
@@ -348,6 +348,10 @@ private[hive] class HiveClientImpl(
     client.getDatabasesByPattern(pattern).asScala
   }
 
+  override def tableExists(dbName: String, tableName: String): Boolean = withHiveState {
+    Option(client.getTable(dbName, tableName, false /* do not throw exception */)).nonEmpty
+  }
+
   override def getTableOption(
       dbName: String,
       tableName: String): Option[CatalogTable] = withHiveState {
@@ -380,8 +384,9 @@ private[hive] class HiveClientImpl(
         tableType = h.getTableType match {
           case HiveTableType.EXTERNAL_TABLE => CatalogTableType.EXTERNAL
           case HiveTableType.MANAGED_TABLE => CatalogTableType.MANAGED
-          case HiveTableType.INDEX_TABLE => CatalogTableType.INDEX
           case HiveTableType.VIRTUAL_VIEW => CatalogTableType.VIEW
+          case HiveTableType.INDEX_TABLE =>
+            throw new AnalysisException("Hive index table is not supported.")
         },
         schema = schema,
         partitionColumnNames = partCols.map(_.name),
@@ -392,20 +397,7 @@ private[hive] class HiveClientImpl(
         createTime = h.getTTable.getCreateTime.toLong * 1000,
         lastAccessTime = h.getLastAccessTime.toLong * 1000,
         storage = CatalogStorageFormat(
-          locationUri = shim.getDataLocation(h).filterNot { _ =>
-            // SPARK-15269: Persisted data source tables always store the location URI as a SerDe
-            // property named "path" instead of standard Hive `dataLocation`, because Hive only
-            // allows directory paths as location URIs while Spark SQL data source tables also
-            // allows file paths. So the standard Hive `dataLocation` is meaningless for Spark SQL
-            // data source tables.
-            DDLUtils.isDatasourceTable(properties) &&
-              h.getTableType == HiveTableType.EXTERNAL_TABLE &&
-              // Spark SQL may also save external data source in Hive compatible format when
-              // possible, so that these tables can be directly accessed by Hive. For these tables,
-              // `dataLocation` is still necessary. Here we also check for input format class
-              // because only these Hive compatible tables set this field.
-              h.getInputFormatClass == null
-          },
+          locationUri = shim.getDataLocation(h),
           inputFormat = Option(h.getInputFormatClass).map(_.getName),
           outputFormat = Option(h.getOutputFormatClass).map(_.getName),
           serde = Option(h.getSerializationLib),
@@ -413,7 +405,10 @@ private[hive] class HiveClientImpl(
           properties = Option(h.getTTable.getSd.getSerdeInfo.getParameters)
             .map(_.asScala.toMap).orNull
         ),
-        properties = properties,
+        // For EXTERNAL_TABLE, the table properties has a particular field "EXTERNAL". This is added
+        // in the function toHiveTable.
+        properties = properties.filter(kv => kv._1 != "comment" && kv._1 != "EXTERNAL"),
+        comment = properties.get("comment"),
         viewOriginalText = Option(h.getViewOriginalText),
         viewText = Option(h.getViewExpandedText),
         unsupportedFeatures = unsupportedFeatures)
@@ -534,17 +529,21 @@ private[hive] class HiveClientImpl(
       table: CatalogTable,
       spec: Option[TablePartitionSpec]): Seq[CatalogTablePartition] = withHiveState {
     val hiveTable = toHiveTable(table)
-    spec match {
+    val parts = spec match {
       case None => shim.getAllPartitions(client, hiveTable).map(fromHivePartition)
       case Some(s) => client.getPartitions(hiveTable, s.asJava).asScala.map(fromHivePartition)
     }
+    HiveCatalogMetrics.incrementFetchedPartitions(parts.length)
+    parts
   }
 
   override def getPartitionsByFilter(
       table: CatalogTable,
       predicates: Seq[Expression]): Seq[CatalogTablePartition] = withHiveState {
     val hiveTable = toHiveTable(table)
-    shim.getPartitionsByFilter(client, hiveTable, predicates).map(fromHivePartition)
+    val parts = shim.getPartitionsByFilter(client, hiveTable, predicates).map(fromHivePartition)
+    HiveCatalogMetrics.incrementFetchedPartitions(parts.length)
+    parts
   }
 
   override def listTables(dbName: String): Seq[String] = withHiveState {
@@ -621,21 +620,22 @@ private[hive] class HiveClientImpl(
 
   def loadPartition(
       loadPath: String,
+      dbName: String,
       tableName: String,
       partSpec: java.util.LinkedHashMap[String, String],
       replace: Boolean,
       holdDDLTime: Boolean,
-      inheritTableSpecs: Boolean,
-      isSkewedStoreAsSubdir: Boolean): Unit = withHiveState {
+      inheritTableSpecs: Boolean): Unit = withHiveState {
+    val hiveTable = client.getTable(dbName, tableName, true /* throw exception */)
     shim.loadPartition(
       client,
       new Path(loadPath), // TODO: Use URI
-      tableName,
+      s"$dbName.$tableName",
       partSpec,
       replace,
       holdDDLTime,
       inheritTableSpecs,
-      isSkewedStoreAsSubdir)
+      isSkewedStoreAsSubdir = hiveTable.isStoredAsSubDirectories)
   }
 
   def loadTable(
@@ -653,21 +653,22 @@ private[hive] class HiveClientImpl(
 
   def loadDynamicPartitions(
       loadPath: String,
+      dbName: String,
       tableName: String,
       partSpec: java.util.LinkedHashMap[String, String],
       replace: Boolean,
       numDP: Int,
-      holdDDLTime: Boolean,
-      listBucketingEnabled: Boolean): Unit = withHiveState {
+      holdDDLTime: Boolean): Unit = withHiveState {
+    val hiveTable = client.getTable(dbName, tableName, true /* throw exception */)
     shim.loadDynamicPartitions(
       client,
       new Path(loadPath),
-      tableName,
+      s"$dbName.$tableName",
       partSpec,
       replace,
       numDP,
       holdDDLTime,
-      listBucketingEnabled)
+      listBucketingEnabled = hiveTable.isStoredAsSubDirectories)
   }
 
   override def createFunction(db: String, func: CatalogFunction): Unit = withHiveState {
@@ -770,7 +771,6 @@ private[hive] class HiveClientImpl(
         HiveTableType.EXTERNAL_TABLE
       case CatalogTableType.MANAGED =>
         HiveTableType.MANAGED_TABLE
-      case CatalogTableType.INDEX => HiveTableType.INDEX_TABLE
       case CatalogTableType.VIEW => HiveTableType.VIRTUAL_VIEW
     })
     // Note: In Hive the schema and partition columns must be disjoint sets
@@ -831,6 +831,9 @@ private[hive] class HiveClientImpl(
     new HivePartition(ht, tpart)
   }
 
+  // TODO (cloud-fan): the column names in partition specification are always lower cased because
+  // Hive metastore is not case preserving. We should normalize them to the actual column names of
+  // the table, once we store partition spec of data source tables.
   private def fromHivePartition(hp: HivePartition): CatalogTablePartition = {
     val apiPartition = hp.getTPartition
     CatalogTablePartition(
@@ -842,6 +845,8 @@ private[hive] class HiveClientImpl(
         serde = Option(apiPartition.getSd.getSerdeInfo.getSerializationLib),
         compressed = apiPartition.getSd.isCompressed,
         properties = Option(apiPartition.getSd.getSerdeInfo.getParameters)
-          .map(_.asScala.toMap).orNull))
+          .map(_.asScala.toMap).orNull),
+        parameters =
+          if (hp.getParameters() != null) hp.getParameters().asScala.toMap else Map.empty)
   }
 }
